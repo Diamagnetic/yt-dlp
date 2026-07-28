@@ -1,4 +1,5 @@
 import functools
+import json
 import urllib.parse
 
 from .common import InfoExtractor
@@ -16,6 +17,9 @@ from ..utils import (
 
 
 class KickBaseIE(InfoExtractor):
+    _API_BASE = 'https://kick.com/api'
+    _PLAYBACK_BASE = 'https://web.kick.com/api'
+
     @functools.cached_property
     def _api_headers(self):
         token = traverse_obj(
@@ -23,9 +27,10 @@ class KickBaseIE(InfoExtractor):
             ('session_token', 'value', {urllib.parse.unquote}))
         return {'Authorization': f'Bearer {token}'} if token else {}
 
-    def _call_api(self, path, display_id, note='Downloading API JSON', headers={}, **kwargs):
+    def _call_api(
+            self, path, display_id, base=None, note='Downloading API JSON', headers={}, **kwargs):
         return self._download_json(
-            f'https://kick.com/api/{path}', display_id, note=note,
+            f'{base or self._API_BASE}/{path}', display_id, note=note,
             headers={**self._api_headers, **headers}, impersonate=True, **kwargs)
 
 
@@ -96,69 +101,66 @@ class KickVODIE(KickBaseIE):
     _VALID_URL = r'https?://(?:www\.)?kick\.com/[\w-]+/videos/(?P<id>[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{12})'
     _TESTS = [{
         # Regular VOD
-        'url': 'https://kick.com/xqc/videos/5c697a87-afce-4256-b01f-3c8fe71ef5cb',
+        'url': 'https://kick.com/itsnitsi/videos/019f9aa4-9468-78e0-98fc-849fc82125d5',
         'info_dict': {
-            'id': '5c697a87-afce-4256-b01f-3c8fe71ef5cb',
+            'id': '019f9aa4-9468-78e0-98fc-849fc82125d5',
             'ext': 'mp4',
-            'title': '🐗LIVE🐗CLICK🐗HERE🐗DRAMA🐗ALL DAY🐗NEWS🐗VIDEOS🐗CLIPS🐗GAMES🐗STUFF🐗WOW🐗IM HERE🐗LETS GO🐗COOL🐗VERY NICE🐗',
-            'description': 'THE BEST AT ABSOLUTELY EVERYTHING. THE JUICER. LEADER OF THE JUICERS.',
-            'uploader': 'xQc',
-            'uploader_id': '676',
-            'channel': 'xqc',
-            'channel_id': '668',
-            'view_count': int,
-            'age_limit': 18,
-            'duration': 22278.0,
-            'thumbnail': r're:^https?://.*\.jpg',
-            'categories': ['Deadlock'],
-            'timestamp': 1756082443,
-            'upload_date': '20250825',
+            'title': 'Saturday Night!!| !ss',
+            'channel_id': '106864665',
+            'uploader': 'ItsNitsi',
+            'duration': 11304,
+            'categories': ['Just Chatting'],
+            'live_status': 'not_live',
         },
         'params': {'skip_download': 'm3u8'},
     }, {
-        # VOD of ongoing livestream (at the time of writing the test, ID rotates every two days)
-        'url': 'https://kick.com/a-log-burner/videos/5230df84-ea38-46e1-be4f-f5949ae55641',
+        # Live stream
+        'url': 'https://kick.com/asmongold247/videos/019fa4ed-50e0-7b20-af58-89225d19cd57',
         'info_dict': {
-            'id': '5230df84-ea38-46e1-be4f-f5949ae55641',
+            'id': '019fa4ed-50e0-7b20-af58-89225d19cd57',
             'ext': 'mp4',
-            'title': r're:😴 Cozy Fireplace ASMR 🔥 | Relax, Focus, Sleep 💤',
-            'description': 'md5:080bc713eac0321a7b376a1b53816d1b',
-            'uploader': 'A_Log_Burner',
-            'uploader_id': '65114691',
-            'channel': 'a-log-burner',
-            'channel_id': '63967687',
-            'view_count': int,
-            'age_limit': 18,
-            'thumbnail': r're:^https?://.*\.jpg',
-            'categories': ['Other, Watch Party'],
-            'timestamp': int,
-            'upload_date': str,
+            'title': r're:Official 24/7 @asmongold \|.*',
+            'channel_id': '63762882',
+            'uploader': 'Asmongold247',
+            'categories': ['Rise of the Ronin'],
             'live_status': 'is_live',
         },
-        'skip': 'live',
+        'params': {'skip_download': 'm3u8'},
+        # 'skip': 'live',
     }]
 
     def _real_extract(self, url):
         video_id = self._match_id(url)
-        response = self._call_api(f'v1/video/{video_id}', video_id)
+        data = json.dumps({
+            'video_player': {'player': {}},
+            'video_session': {},
+            'user_session': {},
+        }).encode()
+        headers = {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json',
+        }
+        response = self._call_api(
+            f'v1/stream/{video_id}/playback', video_id, base=self._PLAYBACK_BASE,
+            note='Downloading playback JSON', headers=headers, data=data)
+
+        vod_url = response['playback_url']['vod']
+        master_m3u8 = self._download_webpage(
+            vod_url, video_id, note='Downloading m3u8 information', impersonate=True)
+        formats, _ = self._parse_m3u8_formats_and_subtitles(
+            master_m3u8, vod_url, 'mp4', video_id=video_id)
 
         return {
             'id': video_id,
-            'formats': self._extract_m3u8_formats(response['source'], video_id, 'mp4'),
+            'formats': formats,
             **traverse_obj(response, {
-                'title': ('livestream', ('session_title', 'slug'), {str}, any),
-                'description': ('livestream', 'channel', 'user', 'bio', {str}),
-                'channel': ('livestream', 'channel', 'slug', {str}),
-                'channel_id': ('livestream', 'channel', 'id', {int}, {str_or_none}),
-                'uploader': ('livestream', 'channel', 'user', 'username', {str}),
-                'uploader_id': ('livestream', 'channel', 'user_id', {int}, {str_or_none}),
-                'timestamp': ('created_at', {parse_iso8601}),
-                'duration': ('livestream', 'duration', {float_or_none(scale=1000)}),
-                'thumbnail': ('livestream', 'thumbnail', {url_or_none}),
-                'categories': ('livestream', 'categories', ..., 'name', {str}),
-                'view_count': ('views', {int_or_none}),
-                'age_limit': ('livestream', 'is_mature', {bool}, {lambda x: 18 if x else 0}),
-                'is_live': ('livestream', 'is_live', {bool}),
+                'title': ('video_session', 'video_title', {str}),
+                'channel_id': ('video_session', 'creator_id', {str_or_none}),
+                'uploader': ('video_session', 'video_series', {str}),
+                'duration': ('video_session', 'video_duration', {int_or_none}),
+                'categories': ('video_session', 'video_content_type', {str}, all),
+                'live_status': ('video_session', 'video_stream_status', {
+                    lambda x: 'is_live' if x == 'live' else 'not_live'}),
             }),
         }
 
